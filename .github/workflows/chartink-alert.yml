@@ -28,5 +28,5 @@ jobs:
           GMAIL_USER:         ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           RECIPIENT_EMAIL:    ${{ secrets.RECIPIENT_EMAIL }}
-          MARKET_HOURS_ONLY:  'true'
+          MARKET_HOURS_ONLY:  'false'
         run: python chartink_alert.py
