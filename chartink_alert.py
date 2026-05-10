@@ -2,7 +2,7 @@
 Chartink Nifty 50 Bullish & Bearish Email Alert
 ------------------------------------------------
 Fetches "Perfect Bullish" and "Perfect Bearish" Nifty 50 stocks from Chartink
-and emails them to you. Designed to run hourly.
+and emails the TOP 5 of each, ranked by today's % change.
 
 You don't need to edit the code — all your details go into "secrets"
 (environment variables). See SETUP_GUIDE.md for step-by-step instructions.
@@ -27,14 +27,33 @@ RECIPIENT_EMAIL = os.environ.get("RECIPIENT_EMAIL", SENDER_EMAIL).strip()
 # Set to "true" if you want emails ONLY during Indian market hours (Mon–Fri, 9 AM–4 PM IST)
 MARKET_HOURS_ONLY = os.environ.get("MARKET_HOURS_ONLY", "true").lower() == "true"
 
+# How many top stocks to show in each list (bullish / bearish)
+TOP_N = 5
+
 # ---------------------------------------------------------------------------
-# 2. SCREENER DEFINITIONS  (Nifty 50 — perfect bullish & perfect bearish)
+# 2. NIFTY 50 STOCK LIST  (used to strictly filter out indices and non-Nifty stocks)
+# ---------------------------------------------------------------------------
+# If the Nifty 50 list changes (rebalancing), you can update this list anytime.
+NIFTY_50 = {
+    "ADANIENT", "ADANIPORTS", "APOLLOHOSP", "ASIANPAINT", "AXISBANK",
+    "BAJAJ-AUTO", "BAJAJFINSV", "BAJFINANCE", "BEL", "BHARTIARTL",
+    "BPCL", "BRITANNIA", "CIPLA", "COALINDIA", "DRREDDY",
+    "EICHERMOT", "GRASIM", "HCLTECH", "HDFCBANK", "HDFCLIFE",
+    "HEROMOTOCO", "HINDALCO", "HINDUNILVR", "ICICIBANK", "INDUSINDBK",
+    "INFY", "ITC", "JSWSTEEL", "KOTAKBANK", "LT",
+    "LTIM", "M&M", "MARUTI", "NESTLEIND", "NTPC",
+    "ONGC", "POWERGRID", "RELIANCE", "SBILIFE", "SBIN",
+    "SHRIRAMFIN", "SUNPHARMA", "TATACONSUM", "TATAMOTORS", "TATASTEEL",
+    "TCS", "TECHM", "TITAN", "TRENT", "ULTRACEMCO", "WIPRO",
+}
+
+# ---------------------------------------------------------------------------
+# 3. SCREENER DEFINITIONS  (perfect bullish & perfect bearish)
 # ---------------------------------------------------------------------------
 # Perfect Bullish: price above 20/50/200 SMA, SMAs stacked up, RSI strong, MACD bullish
 BULLISH_CLAUSE = (
     "( {cash} ( "
-    "group = \"nifty 50\" "
-    "and latest close > latest sma( latest close , 20 ) "
+    "latest close > latest sma( latest close , 20 ) "
     "and latest sma( latest close , 20 ) > latest sma( latest close , 50 ) "
     "and latest sma( latest close , 50 ) > latest sma( latest close , 200 ) "
     "and latest rsi( 14 ) > 55 "
@@ -45,8 +64,7 @@ BULLISH_CLAUSE = (
 # Perfect Bearish: price below 20/50/200 SMA, SMAs stacked down, RSI weak, MACD bearish
 BEARISH_CLAUSE = (
     "( {cash} ( "
-    "group = \"nifty 50\" "
-    "and latest close < latest sma( latest close , 20 ) "
+    "latest close < latest sma( latest close , 20 ) "
     "and latest sma( latest close , 20 ) < latest sma( latest close , 50 ) "
     "and latest sma( latest close , 50 ) < latest sma( latest close , 200 ) "
     "and latest rsi( 14 ) < 45 "
@@ -60,7 +78,7 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 
 # ---------------------------------------------------------------------------
-# 3. FETCH FROM CHARTINK
+# 4. FETCH FROM CHARTINK
 # ---------------------------------------------------------------------------
 def fetch_screener(scan_clause: str) -> list:
     """Run a Chartink scan and return the list of matching stocks."""
@@ -83,15 +101,31 @@ def fetch_screener(scan_clause: str) -> list:
         return resp.json().get("data", []) or []
 
 
+def filter_and_rank(rows: list, top_n: int, ascending: bool) -> list:
+    """Keep only Nifty 50 stocks, then sort by % change and return top N."""
+    # Step 1: Keep only Nifty 50 stocks (excludes indices like CNXENERGY, CNXMNC, etc.)
+    nifty_only = [r for r in rows if (r.get("nsecode") or "").upper() in NIFTY_50]
+
+    # Step 2: Sort by today's % change. Ascending=True for bearish (most negative first).
+    def pct(r):
+        try:
+            return float(r.get("per_chg", 0))
+        except (TypeError, ValueError):
+            return 0.0
+
+    nifty_only.sort(key=pct, reverse=not ascending)
+    return nifty_only[:top_n]
+
+
 # ---------------------------------------------------------------------------
-# 4. BUILD THE EMAIL (HTML, looks clean on mobile and desktop)
+# 5. BUILD THE EMAIL (HTML, looks clean on mobile and desktop)
 # ---------------------------------------------------------------------------
 def stocks_table(rows: list, accent: str) -> str:
     if not rows:
         return f'<p style="color:#666;font-style:italic;margin:8px 0 20px;">No stocks matched right now.</p>'
 
     body = ""
-    for r in rows:
+    for i, r in enumerate(rows, 1):
         symbol = r.get("nsecode", "")
         name   = r.get("name", "")
         price  = r.get("close", "")
@@ -106,6 +140,7 @@ def stocks_table(rows: list, accent: str) -> str:
 
         body += (
             f'<tr>'
+            f'<td style="padding:8px 12px;border-bottom:1px solid #eee;color:#888;font-weight:600;">#{i}</td>'
             f'<td style="padding:8px 12px;border-bottom:1px solid #eee;font-weight:600;">{symbol}</td>'
             f'<td style="padding:8px 12px;border-bottom:1px solid #eee;color:#444;">{name}</td>'
             f'<td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right;">₹{price}</td>'
@@ -116,6 +151,7 @@ def stocks_table(rows: list, accent: str) -> str:
     return (
         f'<table style="width:100%;border-collapse:collapse;background:#fff;border:1px solid #eee;border-radius:8px;overflow:hidden;margin-bottom:24px;">'
         f'<thead><tr style="background:{accent};color:#fff;">'
+        f'<th style="padding:10px 12px;text-align:left;">Rank</th>'
         f'<th style="padding:10px 12px;text-align:left;">Symbol</th>'
         f'<th style="padding:10px 12px;text-align:left;">Name</th>'
         f'<th style="padding:10px 12px;text-align:right;">LTP</th>'
@@ -131,26 +167,26 @@ def build_email_html(bullish: list, bearish: list, ts: datetime) -> str:
 <!DOCTYPE html>
 <html><body style="font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:#f6f7f9;padding:20px;color:#222;">
   <div style="max-width:680px;margin:0 auto;">
-    <h2 style="margin:0 0 4px;">Nifty 50 — Bullish & Bearish Alert</h2>
+    <h2 style="margin:0 0 4px;">Nifty 50 — Top 5 Bullish & Bearish</h2>
     <p style="color:#666;margin:0 0 20px;">{ts.strftime('%A, %d %b %Y · %I:%M %p IST')}</p>
 
-    <h3 style="color:#16a34a;margin:0 0 8px;">🟢 Perfect Bullish ({len(bullish)})</h3>
-    <p style="color:#666;font-size:13px;margin:0 0 8px;">Price &gt; 20/50/200 SMA · SMAs stacked up · RSI &gt; 55 · MACD bullish</p>
+    <h3 style="color:#16a34a;margin:0 0 8px;">🟢 Top 5 Perfect Bullish</h3>
+    <p style="color:#666;font-size:13px;margin:0 0 8px;">Price &gt; 20/50/200 SMA · SMAs stacked up · RSI &gt; 55 · MACD bullish · Ranked by today's % gain</p>
     {stocks_table(bullish, "#16a34a")}
 
-    <h3 style="color:#dc2626;margin:0 0 8px;">🔴 Perfect Bearish ({len(bearish)})</h3>
-    <p style="color:#666;font-size:13px;margin:0 0 8px;">Price &lt; 20/50/200 SMA · SMAs stacked down · RSI &lt; 45 · MACD bearish</p>
+    <h3 style="color:#dc2626;margin:0 0 8px;">🔴 Top 5 Perfect Bearish</h3>
+    <p style="color:#666;font-size:13px;margin:0 0 8px;">Price &lt; 20/50/200 SMA · SMAs stacked down · RSI &lt; 45 · MACD bearish · Ranked by today's % loss</p>
     {stocks_table(bearish, "#dc2626")}
 
     <p style="color:#888;font-size:12px;margin-top:24px;border-top:1px solid #eee;padding-top:12px;">
-      Source: Chartink screener · Automated alert · For information only, not investment advice.
+      Source: Chartink screener · Filtered to Nifty 50 stocks only · Automated alert · For information only, not investment advice.
     </p>
   </div>
 </body></html>"""
 
 
 # ---------------------------------------------------------------------------
-# 5. SEND EMAIL VIA GMAIL
+# 6. SEND EMAIL VIA GMAIL
 # ---------------------------------------------------------------------------
 def send_email(subject: str, html_body: str) -> None:
     msg = MIMEMultipart("alternative")
@@ -165,7 +201,7 @@ def send_email(subject: str, html_body: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 6. MAIN
+# 7. MAIN
 # ---------------------------------------------------------------------------
 def main() -> int:
     if not SENDER_EMAIL or not APP_PASSWORD:
@@ -184,14 +220,16 @@ def main() -> int:
             return 0
 
     print("Fetching bullish screener…")
-    bullish = fetch_screener(BULLISH_CLAUSE)
-    print(f"  → {len(bullish)} stocks")
+    bullish_all = fetch_screener(BULLISH_CLAUSE)
+    bullish = filter_and_rank(bullish_all, TOP_N, ascending=False)
+    print(f"  → {len(bullish_all)} matches, top {len(bullish)} Nifty 50 by % gain")
 
     print("Fetching bearish screener…")
-    bearish = fetch_screener(BEARISH_CLAUSE)
-    print(f"  → {len(bearish)} stocks")
+    bearish_all = fetch_screener(BEARISH_CLAUSE)
+    bearish = filter_and_rank(bearish_all, TOP_N, ascending=True)
+    print(f"  → {len(bearish_all)} matches, top {len(bearish)} Nifty 50 by % loss")
 
-    subject = f"Nifty 50 Alert · 🟢 {len(bullish)} Bullish · 🔴 {len(bearish)} Bearish · {now_ist:%d %b %I:%M %p}"
+    subject = f"Nifty 50 Top 5 · 🟢 Bullish · 🔴 Bearish · {now_ist:%d %b %I:%M %p}"
     html    = build_email_html(bullish, bearish, now_ist)
 
     print("Sending email…")
