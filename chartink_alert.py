@@ -10,6 +10,8 @@ You don't need to edit the code — all your details go into "secrets"
 
 import os
 import sys
+import time
+import random
 import smtplib
 import requests
 from bs4 import BeautifulSoup
@@ -78,27 +80,82 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 
 # ---------------------------------------------------------------------------
-# 4. FETCH FROM CHARTINK
+# 4. FETCH FROM CHARTINK  (with browser-like User-Agent + retry on 429)
 # ---------------------------------------------------------------------------
-def fetch_screener(scan_clause: str) -> list:
-    """Run a Chartink scan and return the list of matching stocks."""
-    with requests.Session() as session:
-        # Get the CSRF token (Chartink requires this on every request)
-        home = session.get(CHARTINK_HOME, timeout=30)
-        soup = BeautifulSoup(home.text, "html.parser")
-        csrf_tag = soup.select_one("[name='csrf-token']")
-        if not csrf_tag:
-            raise RuntimeError("Could not find Chartink CSRF token — site may have changed.")
+# Looking like a normal browser helps avoid Chartink's anti-bot rate limits.
+USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
 
-        session.headers.update({
-            "x-csrf-token": csrf_tag["content"],
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Referer": CHARTINK_HOME,
-        })
 
-        resp = session.post(CHARTINK_PROCESS, data={"scan_clause": scan_clause}, timeout=30)
-        resp.raise_for_status()
-        return resp.json().get("data", []) or []
+def fetch_screener(scan_clause: str, max_retries: int = 4) -> list:
+    """Run a Chartink scan and return the list of matching stocks.
+
+    Retries on 429 (Too Many Requests) and 5xx errors with exponential backoff.
+    """
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            with requests.Session() as session:
+                session.headers.update({
+                    "User-Agent": USER_AGENT,
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.9",
+                })
+
+                # Get the CSRF token (Chartink requires this on every request)
+                home = session.get(CHARTINK_HOME, timeout=30)
+                home.raise_for_status()
+                soup = BeautifulSoup(home.text, "html.parser")
+                csrf_tag = soup.select_one("[name='csrf-token']")
+                if not csrf_tag:
+                    raise RuntimeError("Could not find Chartink CSRF token — site may have changed.")
+
+                session.headers.update({
+                    "x-csrf-token": csrf_tag["content"],
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Referer": CHARTINK_HOME,
+                    "Origin": "https://chartink.com",
+                    "X-Requested-With": "XMLHttpRequest",
+                })
+
+                # Tiny pause between CSRF fetch and the actual scan request
+                time.sleep(0.5)
+
+                resp = session.post(
+                    CHARTINK_PROCESS,
+                    data={"scan_clause": scan_clause},
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                return resp.json().get("data", []) or []
+
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response is not None else None
+            last_error = e
+            # Retry only on rate limits and server errors
+            if status in (429, 500, 502, 503, 504) and attempt < max_retries:
+                # Exponential backoff: 5s, 15s, 45s, with a bit of jitter
+                wait = (5 ** attempt) + random.uniform(0, 3)
+                print(f"  ⚠ Chartink returned {status}. Waiting {wait:.1f}s before retry {attempt + 1}/{max_retries}…")
+                time.sleep(wait)
+                continue
+            raise
+        except requests.exceptions.RequestException as e:
+            last_error = e
+            if attempt < max_retries:
+                wait = (5 ** attempt) + random.uniform(0, 3)
+                print(f"  ⚠ Network error: {e}. Waiting {wait:.1f}s before retry {attempt + 1}/{max_retries}…")
+                time.sleep(wait)
+                continue
+            raise
+
+    # Shouldn't get here, but just in case
+    if last_error:
+        raise last_error
+    return []
 
 
 def filter_and_rank(rows: list, top_n: int, ascending: bool) -> list:
@@ -223,6 +280,9 @@ def main() -> int:
     bullish_all = fetch_screener(BULLISH_CLAUSE)
     bullish = filter_and_rank(bullish_all, TOP_N, ascending=False)
     print(f"  → {len(bullish_all)} matches, top {len(bullish)} Nifty 50 by % gain")
+
+    # Brief pause between the two screener calls so we don't hammer Chartink
+    time.sleep(3)
 
     print("Fetching bearish screener…")
     bearish_all = fetch_screener(BEARISH_CLAUSE)
