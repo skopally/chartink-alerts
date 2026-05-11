@@ -5,7 +5,7 @@ on:
     # Runs at the top of every hour. Cron is in UTC.
     # Indian market hours (9:15 AM – 3:30 PM IST) = 3:45 AM – 10:00 AM UTC.
     # The script also has a built-in market-hours check, so any stray runs are skipped.
-    - cron: '0 * * * *'
+    - cron: '*/15 3-10 * * 1-5'
   workflow_dispatch:   # lets you also run it manually with one click
 
 jobs:
